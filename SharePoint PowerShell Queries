@@ -1,0 +1,557 @@
+In "Inventorying SharePoint Using PowerShell," I discussed how to use Windows PowerShell to inventory top-level SharePoint objects. In "Windows PowerShell Scripts for SharePoint: Info on Files, Pages, Web Parts," I discussed how to use PowerShell scripts to get information out of SharePoint about lists, libraries, files, and pages. In this article, I'll concentrate on users, groups, and security queries.
+
+With the PowerShell commands and scripts presented here, you'll be able to inventory users, groups, group members, site owners, and site collection administrators. You'll also be able to find all users and groups with access to a specific file, folder, or list item. In addition, you'll be able to find all sites, libraries, folders, and documents that have unique permissions (i.e., broken inheritance).
+
+Before Getting Started
+
+Before getting started, there are a few details I need to cover:
+
+Just because you can use PowerShell doesn't mean that you can ignore SharePoint security. In "Inventorying SharePoint Using PowerShell," I describe the basic security requirements. In a nutshell, you need to have at least read permissions to the content you want to explore and be a member of the SharePoint_Shell_Access role for the databases containing that content. You can add the account you're using to run PowerShell as a site collection administrator to every site collection. Alternatively, you can use SharePoint Central Administration user policies to give your account Full Read permissions in each application. (To do so, select Central Administration, choose Application Management, select an application, and click User Policy.)
+The PowerShell scripts are for on-premises installs of SharePoint. They won't work with Office 365 or SharePoint Online.
+Running the PowerShell scripts can put quite a load on a server, so you might want to run these scripts during nonbusiness hours.
+Finally, before you get started, you need to know the difference between SharePoint users and groups. A SharePoint user is a person (e.g., domain\mike) or an Active Directory (AD) group/role (or another authentication group/role). A SharePoint group is a collection of SharePoint users. Both SharePoint users and SharePoint groups are associated with a site collection. For example, you might have a Sales Managers group in the HR site collection and a Sales Managers group in the Sales site collection. The Sales Managers group in the HR site collection isn't necessarily the same collection of users found in the Sales Managers group in the Sales site collection.
+
+With this information in mind, let's look at how you can:
+
+Access information about a user.
+Find AD groups
+List all the SharePoint groups in a site collection
+List all the users in a SharePoint group
+List all the SharePoint groups to which a user belongs
+List all the users in a site collection
+List all site owners
+List all site collection administrators
+List all the users, AD groups, and SharePoint groups with access to a file, folder, or list item
+Find all sites, libraries, folders, and documents with unique permissions
+List AD group members
+ 
+Accessing Information About a User
+
+Sometimes you need to access information about a single user. You can use the Get-SPUser cmdlet with the -Identity parameter for this:
+
+Get-SPUser -web http://server/sites/yoursite
+  -Identity "yourdomain\mike" |
+  Select ID, UserLogin, DisplayName
+Note that the -Identity parameter might not work as expected in SharePoint 2013 because the UserLogin property might display a simple login (domain\mike) or a more complex login that includes Claims Provider information (i:0#.w|domain\mike).
+
+To find a user when using Claims-Based Authentication, you need to do a little filtering:
+
+Get-SPUser -Web http://server/sites/yoursite |
+  Where { $_.UserLogin -LIKE "*|yourdomain\mike" } |
+  Select ID, UserLogin, DisplayName
+You can also find users by filtering by the SPUser object's DisplayName property:
+
+Get-SPUser -Web http://server/sites/yoursite |
+  Where { $_.DisplayName -LIKE "*Conklin*" } |
+  Select ID, UserLogin, DisplayName
+In the results, you'll see an ID field. This is unique to the user, but only in the current site collection. For example, the user domain\mike might have an ID of 117 in the HR site collection and an ID of 12 in the Sales site collection.
+
+The SPUser object exposes many properties in addition to DisplayName. I'll use a few of them in the scripts that follow. For a list of all the properties, see the SPUser properties web page.
+
+You can also query User Profile Services to retrieve additional information about each user. The following command retrieves a custom property named hobbies for a user named sam. The site specified can be any site collection in a web application that's using User Profile Services.
+
+$aSiteCollection = "http://yourdomain/sites/yoursite";
+$serviceContext = Get-SPServiceContext($aSiteCollection);
+$profileManager = New-Object Microsoft.Office.Server.UserProfiles.UserProfileManager($serviceContext);
+$profileManager.GetUserProfile("yourdomain\sam").GetProfileValueCollection("hobbies")
+For more examples, you can search the Internet using the phrase PowerShell UserProfileManager.
+
+Finding AD Groups
+
+In SharePoint, an AD (or another authentication method) group is a special kind of user. To find AD groups, you can filter the list of users using the SPUser object's IsDomainGroup property:
+
+Get-SPUser -Web http://server/sites/yoursite |
+  Where { $_.IsDomainGroup }
+Listing All the SharePoint Groups in a Site Collection
+
+SharePoint groups are scoped, or unique, to a site collection. For example, the Sales Managers group in the Sales site collection isn't the same group as the Sales Managers group in the Training site collection. When listing groups from all site collections, you need to include the URL or the site collection name.
+
+To get information about the SharePoint groups in a single site collection, you can use the Get-SPSite cmdlet in a command such as:
+
+Get-SPSite http://server/sites/yoursite |
+  Select -ExpandProperty RootWeb |
+  Select -ExpandProperty Groups |
+  Select {$_.ParentWeb.Url}, Name
+Note that instead of using Get-SPSite, you can use the Get-SPSiteAdministration cmdlet to obtain a subset of site collection data, which might contain data about site collections to which you don't have access.
+
+To get information about the SharePoint groups in all site collections in a farm, you can run the command:
+
+Get-SPSite -Limit All |
+  Select -ExpandProperty RootWeb |
+  Select -ExpandProperty Groups |
+  Select {$_.ParentWeb.Url}, Name
+Listing All the Users in a SharePoint Group
+
+You can get a list of users in a group by using the Get-SPUser cmdlet or by using any property that returns SPGroup objects. For example, here's a command that does the latter:
+
+Get-SPSite http://server/sites/yoursite |
+  Select -ExpandProperty RootWeb |
+  Select -ExpandProperty Groups |
+  Where {$_.Name -EQ "your group name here"} |
+  Select -ExpandProperty Users |
+  Select Name, Email
+Listing All the SharePoint Groups to Which a User Belongs
+
+To list all the SharePoint groups to which a user belongs, you first need to find that user's SPUser object:
+
+$user = Get-SPUser -Web http://server/sites/yoursite |
+  Where {$_.LoginName -LIKE "*|DOMAIN\SAMC"}
+Once you have this object, you can scan all the site collections in the farm and find all the groups to which the user belongs:
+
+Get-SPSite -Limit All |
+  Select -ExpandProperty RootWeb |
+  Select -ExpandProperty SiteUsers |
+  Where { $user.UserLogin -EQ $_.LoginName } |
+  Select -ExpandProperty Groups |
+  Select Name, {$_.ParentWeb.Url}
+Listing All the Users in a Site Collection
+
+To list all the users in a site collection, you can use the Get-SPUser cmdlet and set the -Web attribute. Because the output will include both people and AD groups, you might want to include the IsDomainGroup property value in the output or filter by that property. (However, AD group members who have never visited the site will not be listed.) For example, the following command includes the IsDomainGroup property value as well as the UserLogin and DisplayName property values in the output:
+
+Get-SPUser -Web http://server/sites/yoursite |
+Select UserLogin, DisplayName, IsDomainGroup
+Figure 1 shows sample results. In Figure 1, notice the ID for the system account. This is a fixed value that will be the same for all site collections. Also note the Claims Provider prefix on each of the UserLogin property values.
+
+Figure 1: Listing All the Users in a Site Collection
+Figure 1: Listing All the Users in a Site Collection
+
+Listing All Site Owners
+
+Before you list all the site owners, you need to know the definition of a site owner. Although you might think a site owner is anyone who has Full Control permission, there's a formal group of site owners. This group can be retrieved from the SPWeb.AssociatedOwnerGroup property. For more about the three associated group properties—AssociatedOwnerGroup, AssociatedMemberGroup and AssociatedVisitorGroup—see my blog post "When is Full Control not Full Control."
+
+To list all the site owners in a single site, you can run the command:
+
+$web = Get-SPWeb http://server/sites/yoursite
+$web.AssociatedOwnerGroup.Users
+To list all the site owner groups in a farm, you can use the command:
+
+Get-SPSite -Limit All | Get-SPWeb -Limit All |
+  Where { $_.AssociatedOwnerGroup -Ne $null } |
+  Select Url, AssociatedOwnerGroup
+To list all the site owners in a farm, you can run the command:
+
+Get-SPSite -Limit All | Get-SPWeb -Limit All |
+  Where { $_.AssociatedOwnerGroup -Ne $null } |
+  Select Url, {$_.AssociatedOwnerGroup.Users}
+Listing All Site Collection Administrators
+
+There are three kinds of site collection administrators: primary site collection administrator (SPSite.Owner), secondary site collection administrator (SPSite.SecondaryContact) and everyone else who has the SPUser.IsSiteAdmin property set to True. If you're unfamiliar with these three types of site collection administrators, see my blog post "Fun and Games with Site Collection Administrators." You might be surprised how they get assigned and changed.
+
+To list the primary and secondary site collection administrators for all the site collections, you can use the command:
+
+Get-SPSite -Limit All | Select Url, Owner, SecondaryContact
+To list all the site collection administrators and their roles, you can run the command:
+
+Get-SPSite -Limit All |
+foreach {$Url = $_.Url; $site=$_; $_.RootWeb} |
+Select -ExpandProperty SiteUsers |
+Where { $_.IsSiteAdmin } |
+Select {$Url}, Name,
+{$(If($_.UserLogin -Eq $site.Owner.UserLogin) {"Primary Contact"}
+  Else {
+    If($_.UserLogin -Eq $site.SecondaryContact.UserLogin) {"Secondary Contact"}
+      Else {"Other"}
+  })
+}
+Figure 2 shows sample results.
+
+Figure 2: Listing All the Site Collection Administrators and Their Roles
+Figure 2: Listing All the Site Collection Administrators and Their Roles
+
+If you want more user-friendly column headings, you can add custom columns using @{ label=""; expression={} }, as shown here:
+
+Get-SPSite -Limit All |
+foreach {$Url = $_.Url; $site=$_; $_.RootWeb} |
+Select -ExpandProperty SiteUsers |
+Where {$_.IsSiteAdmin} |
+Select @{label="Url"; expression={$Url}},
+  Name,
+  @{ label="Admin Role"; expression={
+    $(If($_.UserLogin -Eq $site.Owner.UserLogin) {"Primary Contact"}
+      Else {
+        If($_.UserLogin -Eq $site.SecondaryContact.UserLogin) {"Secondary Contact"}
+        Else {"Other"}
+      })
+  } }
+Figure 3 shows the results with the new column headings.
+
+Figure 3: Using User-Friendly Column Headings When Listing All the Site Collection Administrators and Their Roles
+Figure 3: Using User-Friendly Column Headings When Listing All the Site Collection Administrators and Their Roles
+
+Listing All the Users, AD Groups, and SharePoint Groups with Access to a Specific File, Folder, or List Item
+
+To list all the users, AD groups, and SharePoint groups with access to a file or folder, you can run this script:
+
+$web = Get-SPWeb http://server/sites/yoursite
+$web.GetFile("Shared Documents/Training Schedule.docx") |
+  Select -ExpandProperty ListItemAllFields  |
+  Select -ExpandProperty RoleAssignments |
+  Select {$_.Member.DisplayName}, {$_.Member.LoginName}, RoleDefinitionBindings
+As you can see, the output includes the RoleDefinitionBindings property, which contains the SharePoint permission levels assigned to the user or group. As the sample results in Figure 4 show, this command doesn't expand the AD groups or SharePoint groups to list the group members.
+
+Figure 4: Listing All the Users, AD Groups, and SharePoint Groups with Access to a File or Folder
+Figure 4: Listing All the Users, AD Groups, and SharePoint Groups with Access to a File or Folder
+
+The script to list all the users, AD groups, and SharePoint groups with access to a list item is similar to the script just presented, except it specifies a single list item. To specify the list item, you can use a script such as:
+
+$web = Get-SPWeb http://server/sites/yoursite
+$web.lists["Bikes"].items[0] | Select -ExpandProperty RoleAssignments |
+Select {$_.Member.DisplayName}, {$_.Member.LoginName}, RoleDefinitionBindings
+You can select the "nth" item as this script does (.items[0]) or add a Where-Object filter to select the list item.
+
+Finding All Sites, Libraries, Folders, and Documents with Unique Permissions
+
+SharePoint has only a few types of securable objects: sites, lists, libraries, folders, list items, and library items. To see whether a securable object has unique permissions, you can check the HasUniquePerm property for sites and the HasUniqueRoleAssignments property for all the other types of securable objects. For sites, you also need to check to see if the site is a top-level site because top-level sites always have unique permissions and should be excluded from a "broken inheritance" list. The Where statement to exclude top-level sites looks like this:
+
+Where { $_.HasUniquePerm -AND $_.ParentWeb -NE $Null }
+For lists and libraries, you might also want to exclude hidden lists. In this case, the Where statement looks like this:
+
+Where { $_.HasUniqueRoleAssignments -AND -NOT $_.Hidden }
+The command to check the different types of securable objects is relatively straightforward. To find all the sites with broken inheritance in a site collection, you can run the command:
+
+Get-SPSite http://yourSiteUrl |
+Get-SPWeb -Limit All |
+Where { $_.HasUniquePerm -AND $_.ParentWeb -NE $Null } |
+Select ServerRelativeUrl
+To find all the lists and libraries with broken inheritance in a site collection, you can use the command:
+
+Get-SPSite http://yourSiteUrl |
+Get-SPWeb -Limit All |
+Select -ExpandProperty Lists |
+Where { $_.HasUniqueRoleAssignments -AND -NOT $_.Hidden } |
+Select Title, ParentWebUrl
+To find all the folders with broken inheritance in a site collection, you can run the command:
+
+Get-SPSite http://yourSiteUrl |
+Get-SPWeb -Limit All |
+Select -ExpandProperty Lists |
+Select -ExpandProperty Folders |
+Where { $_.HasUniqueRoleAssignments } |
+Select {$_.ParentList.ParentWebUrl + "/" + $_.ParentList.Title + "/" +$_.DisplayName}
+To find all the list and library items with broken inheritance in a site collection, you can use the command:
+
+Get-SPSite http://yourSiteUrl |
+Get-SPWeb -Limit All |
+Select -ExpandProperty Lists |
+Select -ExpandProperty Items |
+Where { $_.HasUniqueRoleAssignments } |
+Select Name, {$_.ParentList.ParentWebUrl + "/" + $_.ParentList.Title}
+Note that this command might put a heavy load on the server. Thus, you might want to run it during low load times.
+
+If you would like to merge these commands into a single script so that the results are output in a single report, you need to deal with the different columns and data types, then sort the results. Although you could build an array to hold all the content and then sort the array, the array could get very large. A better plan is to take advantage of PowerShell 3.0's Export-CSV cmdlet to merge each collection of data into a single file, then read back that file and sort its contents.
+
+The script in Listing 1 is a bit long and complex, but if you break it down into its parts, you'll see the four commands just given along with custom columns ( @{Label="…"; Expression={…}} ) used to generate a compatible output for each list of objects. The script also modifies the output of each command to produce compatible columns (i.e., Securable, Item, and Parent). You can download the script in Listing 1 by clicking the Download the Code button near the top of the page.
+
+Listing AD Group Members
+
+As I mentioned previously, a SharePoint user is either a person (domain\mike) or an AD group. Up to this point, the commands just listed AD groups and didn't expand them to list the members of the AD groups. A single AD group can have thousands of members. The SharePoint PowerShell module doesn't include cmdlets for managing AD users and groups, but there's an AD module. For more information about it, see the Active Directory Administration with Windows PowerShell web page.
+
+In PowerShell 2.0, you need to load the AD module using the command:
+
+Import-Module -Name activedirectory
+PowerShell 3.0 will find the AD module if it's on your server. As a test, you might try the following two commands, which find AD groups and find users in an AD group, respectively:
+
+Get-ADGroup -Filter * | Select Name
+Get-ADGroupMember -Identity Sales | Select Name
+Listing 2 shows a script that expands an AD group to show its members. Up to this point, most of the script snippets I presented use a single-line command style based on PowerShell pipes. This script uses a programming style that includes foreach and if/else statements. You can download the script in Listing 2 by clicking the Download the Code button near the top of the page. Although you could copy this script into a PowerShell shell, it's easiest to work with in the PowerShell Integrated Scripting Environment (ISE) or a third-party PowerShell editor.
+
+Figure 5 shows sample results. In this case, the SharePoint group named Demo3 Members has three users: one AD group named Sales and two users named Robert and Sam. The AD group named Sales has three members named Stella, Richard, and Susan. So, by expanding the AD group, you can see that the site actually has a total of five people in the Demo3 Members group.
+
+Figure 5: Expanding an AD Group to Show Its Members
+Figure 5: Expanding an AD Group to Show Its Members
+
+From Inventory to Content to Security
+
+In "Inventorying SharePoint Using PowerShell," I showed you how to start inventorying core SharePoint objects, such as site collections and websites. In "Windows PowerShell Scripts for SharePoint: Info on Files, Pages, Web Parts," I showed you how to work with content, such as finding all documents of a certain type (e.g., .docx) or over a certain size, listing all libraries (including their file counts and total file size), and finding all libraries that use a specific content type. In this article, I showed you how to get information about users, groups, site owners, and site collection administrators. I also showed you how to run security queries to find out which files, folders, and list items that users, AD groups, and SharePoint groups have access to. I even showed you how to use PowerShell to find out if you have any sites, libraries, folders, and documents with broken inheritance. What would you like to see next?
+
+As I discussed in "Inventorying SharePoint Using PowerShell," Windows PowerShell is a valuable tool that you can use to inventory top-level SharePoint objects. That article shows you how to get lists of farm features, web applications, site collections, and sites using PowerShell cmdlets. In this article, I will explain how you can use PowerShell to obtain information from SharePoint about lists, libraries, files, and pages. Here are some of the tasks we will explore:
+
+Find lists and libraries based on just about any feature (e.g., versioning, content approval, date created).
+Find all libraries that use a selected content type.
+Find all items based on a selected column (including finding all documents created by a user).
+Find all documents of a certain type (e.g., .docx).
+Find all files larger than a certain size.
+List all libraries, their file counts, and total file size.
+
+Permissions
+
+A reminder before we get started: Just because you can use PowerShell does not mean that you can ignore SharePoint security. See "Inventorying SharePoint Using PowerShell" for the basic security requirements. You will need to have at least read permissions to the content you want to explore. You can add the account you're using with PowerShell as a site collection administrator to every site collection or use SharePoint Central Administration user policies to give your account full read permissions in each application (select Central Administration, Application Management, then select an application, then click User Policy).
+
+
+A Warning
+
+The scripts I will show you can put quite a load on the server while they're running and can impact your users. You might want to run these scripts only outside of business hours. Before starting with these scripts, please review "Inventorying SharePoint Using PowerShell."
+
+
+General Pattern for the Sample Scripts
+
+All the sample scripts in this article are "one-liners." Although they are formatted into multiple lines to fit the article layout, you can enter them on one line. You can also enter the scripts on multiple lines if you break them after the pipe ( | ) or add a back tick ( ` ) at the end of each line. For writing and test scripts, I highly recommend using the Windows PowerShell Integrated Scripting Environment (ISE) over the command prompt.
+
+The scripts in this article follow this pattern:
+
+Select a web, a site collection of webs, or the entire farm of webs:
+Get-SPWeb http://sharepoint/sites/training
+Get-SPSite http://sharepoint/sites/training -Limit All | Select -ExpandProperty AllWebs
+Get-SPSite http://sharepoint/sites/training -Limit All | Select -ExpandProperty AllWebs OR
+Get-SPSite http://sharepoint/sites/training -Limit All | Get-SPWeb -Limit All
+Get-SPSite -Limit All | Select -ExpandProperty AllWebs OR
+Get-SPSite -Limit All | Get-SPWeb -Limit All
+Expand the Lists property and pass each list one at a time though the pipe:
+Select -ExpandProperty Lists
+Filter the lists:
+Where { $_.GetType().Name -eq "SPDocumentLibrary" }
+Expand the list's Items collection and pass each item one at a time though the pipe:
+Select -ExpandProperty Items
+Filter the items:
+Where { $_.Name -like "*airplane*" }
+Select and format the results:
+Select Name, @{Name = "URL";Expression = {$_.ParentList.ParentWeb.Url + "/" + $_.Url}
+And in some cases, summarize the results:
+Group ParentWebUrl | Select Name, Count
+And for brevity, common aliases have been used -- for example, Select = Select-Object, Where = Where-Object, Group = Group-Object.
+ 
+
+A Single Web, Site Collection, Application, or an Entire Farm? 
+
+In the examples that follow, we will start from a single SharePoint site (a web) with a statement something like this one:
+Get-SPWeb http://sharepoint/sites/training/salestraining |
+   Select -ExpandProperty Lists |
+   Select Title
+
+You can expand these examples to inventory a full site collection, a web application, or an entire farm by piping from the higher-level objects and including details in your final Select about the higher levels.
+
+All lists in the site collection:
+
+Get-SPSite http://sharepoint/sites/training -Limit All |
+   Select -ExpandProperty AllWebs |
+   Select -ExpandProperty Lists |
+   Select ParentWebUrl, Title
+
+All site collections in a single web application:
+
+Get-SPSite -WebApplication http://sharepoint -Limit All |
+   Select -ExpandProperty AllWebs |
+   Select -ExpandProperty Lists |
+   Select ParentWebUrl, Title
+
+All site collections in the farm:
+
+Get-SPSite -Limit All |
+   Select -ExpandProperty AllWebs |
+   Select -ExpandProperty Lists |
+   Select {$_.ParentWeb.Url}, Title
+
+Note: In this last example, we replaced ParentWebUrl with {$_.ParentWeb.Url} because ParentWebUrl is an application-relative URL and does not show us the full URL of the application.
+
+Tip: Getting quick counts. If you only want to know the count of the items found, you can wrap a PowerShell expression in parentheses and add the Count property. So to see how many lists there are in the entire farm, you could use this statement:
+
+( Get-SPSite -Limit All |
+   Select -ExpandProperty AllWebs |
+   Select -ExpandProperty Lists ).Count
+
+Finding Lists of a Certain Type
+
+There are two basic list types: lists and libraries. To find one or the other, you can test for the list type by calling GetType().
+
+To find only lists:
+
+Get-SPWeb http://sharepoint/sites/training |
+   Select -ExpandProperty Lists |
+   Where { $_.GetType().Name -eq "SPList" } |
+   Select Title
+
+To find only libraries:
+
+Get-SPWeb http://sharepoint/sites/training |
+   Select -ExpandProperty Lists |
+   Where { $_.GetType().Name -eq "SPDocumentLibrary" } |
+   Select Title
+
+Many lists and libraries are used internally by SharePoint and are typically hidden from users. Examples of these include the Master Page Gallery and the Workflows library. We can exclude these lists from most of our searches as they will not contain end-user content. To do so, add "-and -not $_.hidden" to the Where statement.
+
+Get-SPWeb http://sharepoint/sites/training |
+   Select -ExpandProperty Lists |
+   Where { $_.GetType().Name -eq "SPDocumentLibrary" -and
+           -not $_.hidden } |
+   Select Title
+
+
+Finding Lists and Libraries by Just About Any Property
+
+By changing the property you filter on in the Where clause, you can find lists and libraries based on just about any property or feature. Following is an example that finds lists and libraries that support versioning. Just edit the Where clause to search for another property.
+
+Get-SPWeb http://sharepoint/sites/training |
+   Select -ExpandProperty Lists |
+   Where { -not $_.hidden -and
+           $_.EnableVersioning -eq $true} |
+   Select ParentWebUrl, title
+
+Here are some of the features you might search for (where $_ is a list or library):
+
+Versioning: $_.EnableVersioning -eq $true
+Content approval enabled: $_.EnableModeration -eq $true
+External Lists: $_.HasExternalDataSource -eq $true
+Is email enabled: $_.EmailAlias -ne $null or just $_.EmailAlias
+Are RSS feeds enabled: $_.AllowRssFeeds -eq $true
+Attachments enabled (for lists only) $_.EnableAttachments -eq $true
+Folders enabled: $_.EnableFolderCreation -eq $true
+Has folders: $_.Folders.Count -gt 0
+Has no items: $_.ItemCount -eq 0 (Note: External lists will always report ItemCount=0.)
+Has more than x items: $_.ItemCount -gt 1000
+Has associated workflows: $_.WorkflowAssociations.count -gt 0
+Is displayed on QuickLaunch: $_.OnQuickLaunch -eq $true
+Has broken inheritance (unique permissions) $_.HasUniqueRoleAssignments -eq $true (I'll cover permissions in more detail in an upcoming article.)
+Who created the library: $_.Author -like "sharepoint\stellas"
+Dates: Find lists and libraries based on when they were created or the last time an item was added/modified or deleted.
+$_.LastItemModifiedDate -gt (Get-Date 1/1/2013)
+Created
+LastItemModifiedDate
+LastItemDeletedDate
+Or any combination of the previous statements by using -Or, -And, or -Not and grouping the conditions with parentheses. Example: ( $_.Author -like "sharepoint\stellas" -or $_.Author -like "sharepoint\samc" ) -and $_.LastItemModifiedDate -gt (Get-Date 1/1/2013)
+ 
+
+Finding Lists Using a Certain Content Type
+
+Although you could filter on the title of a list, that isn't a very reliable way to find all Announcement lists or all document libraries. Your site owners can name their lists anything they like. Because lists can support more than one content type, a better way is to search for lists that support a certain content type.
+
+You first might want to display all the content types used in a site collection, so that you will know their names:
+
+Get-SPWeb http://sharepoint/sites/training |
+   Select -ExpandProperty ContentTypes |
+   Select Name, ID | Sort Name
+
+Now let's find all the Announcement lists in a site collection. To do so, we will filter the list of lists by content type.
+
+Get-SPSite http://sharepoint/sites/training |
+   Select -ExpandProperty AllWebs |
+   Select -ExpandProperty Lists |
+   ForEach { ForEach($ct in $_.ContentTypes)
+     { if($ct.Name -eq "Announcement") {$_} } } |
+   Select ParentWebUrl, Title
+
+This example needs some explaining! The outer ForEach accepts a List object from the pipe and runs the code in the brackets ( { } ). That code checks each content type "(ForEach($ct in $_.ContentTypes))" to verify that its name is "Announcement" and, if so, sends the list "( $_ )" on to the next pipe. From there, we can then select the URL and Title of the list. Here's a reformatted version to better show the nesting:
+
+... | ForEach      for each item in the pipe
+    {
+      ForEach($ct in $_.ContentTypes) for each item in the content type collection
+        {
+                 If it's the one we want, pass it ($_) on to the next pipe
+          if($ct.Name -eq "Announcement") {$_}
+        }
+    }
+| ...
+
+
+Finding List Items and Library Documents of a Certain Type
+
+Documents are stored in two places: libraries and as list attachments. Although the library's item properties will have most of the information you'll need, some data such as file size is available from a child object named File. Files in lists are found in the Attachments property.
+
+We will look first at finding documents in libraries. There are a number of ways we might want to find list items and documents:
+
+by a word in the document's title
+by a value in a column
+by file type (e.g., .doc, .docx, .ppt, .pdf)
+by size
+by content type (as discussed earlier)
+by age
+by a feature such as versioning or content approval
+any combination of these criteria
+Tip: When filtering content using Where-Object (or just Where), you can use the operators -Like and -Match. Like uses wildcards ("*" and "?"), as shown in the following example; Match uses regular expressions.
+
+Where { $_.Name -Like "*share*" }
+
+By a word in the document's title. By using a Where cmdlet with a -like test, we can find all the matching items in all libraries in a site. Folders and document sets are also items in a library and will be included if they match. We will add a test for content types later to be able to select or exclude items such as folders. The following example displays the file size and the URL to the file. Note that the file size is extracted from the library item's File property.
+
+                              Get-SPWeb http://sharepoint/sites/training |                                 Select -ExpandProperty Lists |                                 Where { $_.GetType().Name -eq "SPDocumentLibrary" -and                                         -not $_.Hidden } |                                 Select -ExpandProperty Items |                                 Where { $_.Name -like "*airplane*" } |                                 Select Name, {$_.File.Length}, url                              
+By a value in a column. You can filter your search on any of the columns in the list or library. To filter on a column, you will first need a list of the columns in the library. Columns are referred to as fields in SharePoint lists. Here's how to get the list of columns/fields on the Shared Documents library:
+
+Get-SPWeb http://sharepoint/sites/training |
+   Select -ExpandProperty Lists |
+   Where { $_.Title -eq "Shared Documents" } |
+   Select -ExpandProperty Fields | Select Title, InternalName
+
+To filter the list of documents using a field, just add a Where-Object { $_["fieldname"] -eq "sometext"} to the pipeline.
+
+Notes:
+
+There is no period after the "$_" when working with fields -- for example, $_["Created By"].
+The field name is case sensitive.
+You can use either the field's Title or InternalName, but the InternalName is more reliable as the site owner can rename column titles.
+The following example finds all the libraries created by a user:
+
+                              Get-SPWeb http://sharepoint/sites/training |                                 Select -ExpandProperty Lists |                                 Where { $_.GetType().Name -eq "SPDocumentLibrary" -and                                        -not $_.Hidden } |                                 Select -ExpandProperty Items |                                 Where { $_["Created By"] -like "*sharepoint\stella*" } |                                 Select Name, url, {$_["Created By"]}                              
+Note that fields that store users and look up fields include an ID number, a delimiter (";#"), and the text value. You will either need to use a regular expression pattern to match the text after the delimiter or use -like with a leading wildcard.
+
+The next example finds all the documents in the farm with a specified column value. (In this case, find every document created by sharepoint\stellas.)
+
+                              Get-SPSite -Limit All |                                 Get-SPWeb -Limit All |                                 Select -ExpandProperty Lists |                                 Where { $_.GetType().Name -eq "SPDocumentLibrary" -and                                        -not $_.Hidden } |                                 Select -ExpandProperty Items |                                 Where { $_["Created By"] -like "*stella*" } |                                 Select Name,                                        @{ Name = "URL";                                           Expression = {$_.ParentList.ParentWeb.Url + "/" + $_.Url }                                         }                              
+Note: The "@{ Name=""; Expresion={…} }" is used to create a derived, or calculated, column.
+
+By file type. Looking for files by their file extension is simply a matter of searching for the extension text within the name of the file. To find ".docx" files, you just pipe the list of items to "Where { $_.Name -Like "*.docx" }". Although you could find all ".doc" and ".docx" files with "Where { $_.Name -Like "*.doc*" }", a more precise approach would be to test for both extensions with "Where { $_.Name -Like "*.doc" -or $_.Name -Like "*.docx" }".
+
+                                 Select -ExpandProperty Lists |                                 Where { $_.GetType().Name -eq "SPDocumentLibrary" -and                                         -not $_.Hidden } |                                 Select -ExpandProperty Items |                                 Where { $_.Name -Like "*.docx" } |                                 Select Name,                                       @{Name="URL";                                        Expression={$_.ParentList.ParentWeb.Url + "/" + $_.Url}}                              
+If you want to find more than one type, simply add "-or" to the Where clause:
+
+Where {     $_.Name -Like "*.docx"
+        -or $_.Name -Like "*.xlsx"
+        -or $_.Name -Like "*.pptx" }
+
+By size. File size is just another field, so testing for size is similar to several of the previous examples. Be careful, though -- there's more than one file size property!
+
+$_.File.Length (This is numeric and is probably the best choice.)
+$_["File Size"] (This is the same value as $_.File.Length but is text, not a number.)
+$_.File.TotalLength (This is the same as $_.File.Length, except for web part pages where the value includes the storage needed for the page and the web parts.)
+                              Get-SPWeb http://sharepoint/sites/training |                                 Select -ExpandProperty Lists |                                 Where { $_.GetType().Name -eq "SPDocumentLibrary" -and                                         -not $_.Hidden } |                                 Select -ExpandProperty Items |                                 Where { $_.File.Length -gt 5000 } |                                 Select Name, {$_.File.Length},                                        @{Name="URL";                                        Expression={$_.ParentList.ParentWeb.Url + "/" + $_.Url}}                              
+By age. To filter by date, we can compare against a date or a calculated date. You will need to know the field name or the internal name. The following example finds all documents in the farm created before 12/1/2011:
+
+                              Get-SPSite -Limit All |                                 Get-SPWeb -Limit All |                                 Select -ExpandProperty Lists |                                 Where { $_.GetType().Name -eq "SPDocumentLibrary" -and                                         -not $_.Hidden } |                                 Select -ExpandProperty Items |                                 Where { $_["Created"] -lt (get-date "12/1/2011") } |                                 Select Name, {$_["Created"]},                                    @{Name="URL";Expression={$_.ParentList.ParentWeb.Url + "/" + $_.Url}}                              
+You can also use the Get-Date cmdlet to do date math. Get-Date returns today's date by default. By wrapping the cmdlet in parentheses, we can then call the .Net DateTime methods to calculate any future or past date. Some of the methods include AddMinutes, AddDays, and AddYears. Here's an example that finds all documents more than three years old and uses (Get-Date).AddYears(-3):
+
+                              Get-SPWeb http://sharepoint/sites/training/salestraining |                                 Select -ExpandProperty Lists |                                 Where { $_.GetType().Name -eq "SPDocumentLibrary" -and                                         -not $_.Hidden } |                                 Select -ExpandProperty Items |                                 Where { $_["Created"] -lt (Get-Date).AddYears(-3) } |                                 Select Name, {$_["Created"]},                                    @{Name="URL";Expression={$_.ParentList.ParentWeb.Url + "/" + $_.Url}}                              
+By a feature such as versioning or content approval. Versioning is a great feature of SharePoint, when properly used. Site owners often turn on versioning without setting version limits. As a result, you can end up with hundreds of versions as users edit a document. List and library items have a property called Versions that contains the collection of all versions of an item. We can get the count of Versions to find documents with excessive numbers of versions. The following example finds all documents with more than 20 versions:
+
+                              Get-SPWeb http://sharepoint/sites/training/salestraining |                                 Select -ExpandProperty Lists |                                 Where { $_.GetType().Name -eq "SPDocumentLibrary" -and                                         -not $_.Hidden } |                                 Select -ExpandProperty Items |                                 Where { $_.Versions.Count -gt 20 } |                                 Select Name, @{Name="URL";Expression={$_.ParentList.ParentWeb.Url + "/" + $_.Url}},                                        {$_.versions.count}                              
+We can speed up the previous example by checking only those lists that have the property EnableVersioning set to $true.
+
+                              Get-SPWeb http://sharepoint/sites/training/salestraining |                                 Select -ExpandProperty Lists |                                 Where { $_.GetType().Name -eq "SPDocumentLibrary" -and                                         -not $_.Hidden -and                                         $_.EnableVersioning -eq $true } |                                 Select -ExpandProperty Items |                                 Where { $_.Versions.Count -gt 20 } |                                 Select Name, @{Name="URL";Expression={$_.ParentList.ParentWeb.Url + "/" + $_.Url}},                                        {$_.versions.count}                              
+List All Libraries, Their File Counts, and Total File Size
+
+The previous sample scripts returned lists of things. Sometimes you just want counts. PowerShell includes a Group-Object cmdlet that does this nicely.
+
+Example: How many non-hidden lists are in each site (SPWeb)?
+
+                              Get-SPSite -Limit All |                                 Get-SPWeb -Limit All |                                 Select -ExpandProperty Lists |                                 Where { -not $_.hidden } |                                 Group ParentWebUrl |                                 Select Name, Count |                                 FT -AutoSize                              
+In this example, we are getting all site collection, all webs, and all the lists that are not hidden, then grouping on the URL of the web. The last step is to select the name and count of the group. For neatness, you can use Format-Table (FT) to adjust the widths of the columns.
+
+Example: How many documents are in each library in a web?
+
+                              Get-SPWeb http://sharepoint/sites/training |                                 Select -ExpandProperty Lists |                                 Where { $_.GetType().Name -eq "SPDocumentLibrary" -and                                         -not $_.Hidden } |                                 Select -ExpandProperty Items |                                 Group {$_.ParentList.ParentWeb.Url + "/" + $_.ParentList.Title} |                                 Select Name, Count |                                 FT -AutoSize                              
+The only trick in this example is the grouping on an expression to get the full path to the library. The count was easy as the Group-Object cmdlet automatically added the count. To get subtotals by library will take a little more work.
+
+Example: Get the count and total size of the documents that are in each library in a web.
+
+                              Get-SPWeb http://sharepoint/sites/training |                                 Select -ExpandProperty Lists |                                 Where { $_.GetType().Name -eq "SPDocumentLibrary" -and                                 -not $_.Hidden } |                                 Select -ExpandProperty Items |                                 Group {$_.ParentList.ParentWeb.Url + "/" + $_.ParentList.Title} |                                 Select Name, count,                                        @{Name='Total';                                          Expression={$_.Group |                                             ForEach-Object `                                              -Begin {$total=0;} `                                              -Process {$total+=[int]$_.File.Length} `                                              -End {$total} `                                          }                                         } |                                 format-table -AutoSize                              
+All the lines down to the Group statement are the same as in the previous example. In the Select statement, we are displaying the name and count of the group, then using a ForEach to loop through each item in the group to add up the total.
+
+Note the back ticks ( ` ) in the ForEach section. These are "continued on next line" marks that are needed because we broke the ForEach into multiple lines. You could write the same expression without the back ticks if it is all on one line.
+
+ForEach-Object -Begin { ... } -Process { ... } -End { ... }
+
+To filter by file type and size, we just add a Where statement to filter the items.
+
+                              Get-SPWeb http://sharepoint/sites/training |                                 Select -ExpandProperty Lists |                                 Where { $_.GetType().Name -eq "SPDocumentLibrary" -and                                         -not $_.Hidden } |                                 Select -ExpandProperty Items |                                 Where { $_.Name -like "*.docx" -and                                         $_.File.Length -gt 10000000 } |                                 Group {$_.ParentList.ParentWeb.Url + "/" + $_.ParentList.Title} |                                 Select Name, Count |                                 FT -AutoSize                              
+Tip: How large is a megabyte? Some say 1,000,000 bytes; others say 1,048,576 bytes. If you want to use the second example of a megabyte and you don't have all your powers of two memorized, then let PowerShell do the work! Just type two letters: KB, MB, GB, or TB. There are no spaces between your number and the two letters.
+
+1KB = 1024
+1MB = 1048576
+1GB = 1073741824
+1TB = 1099511627776
+So, for example, to find files larger than 10MB, just type this:
+
+$_.File.Length -gt 10MB
+
+ 
+
+From Inventory to Content to Security
+
+In the first article in this series, we got a start on inventorying core SharePoint objects such as site collections and websites. In this article, we focused on content, such as finding all documents of a certain type (e.g., .docx) or larger than a certain size; listing all libraries, their file counts, and total file size; or finding all libraries that use a specific content type. In the next article, we'll focus on users and security, such as listing all groups and their members; all site owners in all sites; all site collection administrators; all users who have access to a file; everything to which a user has access; and all sites, libraries, folders, and documents that have unique permissions (i.e., broken inheritance).
