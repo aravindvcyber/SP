@@ -1,0 +1,285 @@
+$ver = $host | select version
+if($Ver.version.major -gt 1) {$Host.Runspace.ThreadOptions = "ReuseThread"}
+
+Try
+{
+	# Try to find the SP2007 Registry Key
+	$SP2007_RegKey = Get-Item "hklm:software\microsoft\shared tools\web server extensions\12.0" -ErrorAction Stop
+	# Us the SP2007 hack to get the SP module loaded
+	[void][System.Reflection.Assembly]::LoadWithPartialName("Microsoft.SharePoint")
+}
+
+Catch [System.Management.Automation.RuntimeException]
+{
+	# Otherwise it must be SP2010 or newer, which have proper a PowerShell Module
+    if(!(Get-PSSnapin Microsoft.SharePoint.PowerShell -ea 0))
+    {
+        Add-PSSnapin Microsoft.SharePoint.PowerShell
+    }
+}
+
+##
+#Set Script Variables
+##
+
+#Specify the Web Application to be targeted
+$WebApplicationURL = "http://yoursitehere"
+
+#Speciy the domain in which users exist, that you would want to report on
+$UnwantedDomainPrefix = ""
+
+#Speicy a directory for which to log the results
+$LoggingDirectory = "C:\YourPathHere\"
+
+##
+#Load Functions
+##
+
+#This function ensures that the logging directory exists before we start writing to any files
+Function EnsureLoggingDirectory ($LoggingDirectory)
+{
+    #If the logging directory specified does not exist, create the directory
+    if(!(Test-Path $LoggingDirectory))
+    {
+    #Create a file name dynamically based on the logging directory and the time of day that the script was executed
+    Set-Variable -name Filename -Value ("$LoggingDirectory\SecurityReport_" +$StartTime +".txt") -Scope Script
+    
+    #Notify the user that the log file directory did not exist and that it will be created
+    Write-Host "Path " $LoggingDirectory " does not exist. `r`nCreating Directory"
+    
+    #Create the logging directory
+    New-Item -Path $LoggingDirectory -ItemType Directory
+    }
+}
+
+#This function removes any trailing slashes from the logging directory, such that a dynamic filename can be created
+Function TrimDirectory ($LoggingDirectory)
+{
+    #If the logging directory ends with a slash, proceed into the script block
+    if($LoggingDirectory.EndsWith("\"))
+    {
+        #Remove the last character, which will be a slash, from the specified logging directory
+        Set-Variable -Name LoggingDirectory -Value ($LoggingDirectory.Substring(0, ($LoggingDirectory.Length - 1))) -Scope Script
+    }
+}
+
+#This function determines the source of the user AD/Local NT vs Membership provider
+Function UserSource([string]$AUser)
+{
+    if($AUser.split("\").count -gt 1)
+    {
+        $AUser.split("\")[0]
+    }
+    elseif ($AUser.split(":").count -gt 1)
+    {
+        $AUser.split(":")[0]
+    }
+    else
+    {
+        ""
+    }
+}
+
+##
+#Start Script Execution
+##
+
+#Create a variable based on the current date and time
+$StartTime = (Get-Date -UFormat "%Y-%m-%d_%I-%M-%S %p").tostring()
+
+#Call the TrimDirectory function to remove trailing slashes from the logging directory
+TrimDirectory $LoggingDirectory
+
+#Call the EnsureLoggingDirectory function to ensure that the logging directory exists before we start writing to a log file
+EnsureLoggingDirectory $LoggingDirectory
+
+#Dynamically generate the log file name
+$Filename = "$LoggingDirectory\SecurityReport_" +$StartTime +".txt"
+
+#Create a brief header for the document, describing what information is in the report
+"Security Report: $StartTime `r`n" | Out-File $Filename -Force
+"Finding Users Beginning with "  + $UnwantedDomainPrefix + "\ and NTAuthority" | Out-File $Filename -Append
+
+$farm = [Microsoft.SharePoint.Administration.SPFarm]::Local
+$farmWebServices = $farm.Services | where -FilterScript {$_.GetType() -eq [Microsoft.SharePoint.Administration.SPWebService]}
+
+# SP2007 doesn't have Get-SPWeb so use a slightly different method to iterate through the WebApps and use the URL to determine the correct site to use
+foreach ($farmWebService in $farmWebServices) {
+  foreach ($webApplication in $farmWebService.WebApplications) {
+
+#Perform some actions against each site retrieved
+foreach($Site in $webApplication.Sites)
+{
+    #Return all webs in each site collection returned to the AllWebs variable
+    $AllWebs = $Site.Allwebs
+    
+    # Write-Host $Site.URL.substring(0,$WebApplicationURL.length) " vs " $WebApplicationURL  
+	# Write-Host $Site.URL "(" $Site.Url.IndexOf(":", 6) ") vs " $WebApplicationURL "(" $WebApplicationURL.IndexOf(":", 6) ")"
+	# Check if the current Site starts with the URL we're wanting to use
+    if (($Site.URL.substring(0,$WebApplicationURL.length) -eq $WebApplicationURL) -and
+	    ($WebApplicationURL.IndexOf(":", 6) -eq $Site.Url.IndexOf(":", 6)))
+	{
+    # Write-Host "yes"
+    #Write the target Site Collection to the log file 
+    "`r`n`r`nSite: " +$Site.URL | Out-File $Filename -Append
+    
+    #Perform some actions against each web retrieved from the current target site collection
+    foreach($Web in $AllWebs)
+    {
+        #Perfom some actions against a web if it has been assigned unique permissions
+        if($Web.HasUniqueRoleAssignments)
+        {
+            #Determine if the target web is the root web of the site collection.  These sites are expected to have unique permissions assinged.
+            if($Web.isrootweb)
+            {
+                #Log that the targeted web is the root web and will have unique permissions
+                "`r`nweb '" + $Web.url + "' is Root Web and has unique permissions" | Out-File $Filename -Append
+            }
+            else
+            {
+                #For other webs which have unique permissions applied, simply log that he web uses unique permissions
+                "`r`nWeb '" + $Web.url + "' is using unique permissions" | Out-File $Filename -Append
+            }
+            
+            #Return a list of all role assignment entries at the web level
+            $WebRoleAssignments = $Web.RoleAssignments
+            
+                #Perform some action against each role assignment returned
+                foreach($WebRoleAssignment in $WebRoleAssignments)
+                {
+                    # Write-Host $WebRoleAssignment.Member.LoginName
+                    #Determine whether This is a an AD/User object or a SharePoint group.  
+                    # Only domain users/groups and membership provider users have a LoginName property
+                    if(UserSource($WebRoleAssignment.Member.LoginName) -ne "" )
+                    {
+                        #If the User's domain matches the target domain or NT Authority (for authenticatec users), perform some action
+                        if((UserSource($WebRoleAssignment.Member.LoginName)) -eq $UnwantedDomainPrefix -or $UnwantedDomainPrefix -eq "")
+                        {
+                            #Write an entry to the log file indicating that the targeted user has been granted a a specific right.
+                            "User '" + $WebRoleAssignment.Member.Name + "'(" + (UserSource($WebRoleAssignment.Member.LoginName)) + ") has been assigned '" + ($WebRoleAssignment.RoleDefinitionBindings | select name).name + "'" | Out-File $Filename -Append
+                        }
+                    }
+                    else
+                    #For any entry which is determined to not be a user, it is a SharePoint group
+                    {
+                        #Return all users which have been added to the role assignment
+                        $allWebUsers = $WebRoleassignment.member.users
+                        
+                        #Perform some action against all members returned.
+                        foreach($WebUser in $AllWebUsers)
+                        {
+                                # Write-Host $WebUser.Userlogin vs $WebUser.LoginName
+                                #If the User's domain matches the target domain or NT Authority (for authenticatec users), perform some action
+                                if((UserSource($WebUser.LoginName)) -eq $UnwantedDomainPrefix -or $UnwantedDomainPrefix -eq "")
+                                {
+                                    #Write an entry to the log file indicating that the targeted user has been added to the specified SharePoint group.
+                                    "User '" + $WebUser.Name + "'(" + (UserSource($WebUser.LoginName)) + ") has been added to the '" + $WebRoleAssignment.member.name + "' group." | Out-File $Filename -Append
+                            }
+                        }
+                    }
+                }
+			}
+            #Return a list of all lists in the target web
+            $AllLists = $Web.lists    
+            
+            #Perform some action against all lists returned
+            foreach($List in $AllLists)
+            {
+                #Perfom some actions against a list if it has been assigned unique permissions
+                if($List.HasUniqueRoleAssignments)
+                {
+                    #Log to the log file thta the specified list is assigned u nique permissions
+                    "`r`nList '" + $List.title + "' is using unique permissions `r`nURL: " + $WebApplicationURL +$List.DefaultViewURL | Out-File $Filename -Append
+                    
+                    #Return a list of all role assignment entries at the list level
+                    $RoleAssignments = $List.RoleAssignments
+                    
+                    #Perform some action against all role assignments returned
+                    foreach($RoleAssignment in $RoleAssignments)
+                    {
+                        #Determine whether This is a an AD object or a SharePoint group.  Only domain users and groups have a userlogin property
+                        if(UserSource($RoleAssignment.Member.LoginName) -ne "")
+                        {
+                            #If the User's domain matches the target domain or NT Authority (for authenticatec users), perform some action
+                            if((UserSource($RoleAssignment.Member.LoginName)) -eq $UnwantedDomainPrefix -or $UnwantedDomainPrefix -eq "")
+                            {
+                                #Write an entry to the log file indicating that the targeted user has been granted a a specific right.
+                                "User '" + $RoleAssignment.Member.Name + "'(" + (UserSource($RoleAssignment.Member.LoginName)) + ") has been assigned '" + ($RoleAssignment.RoleDefinitionBindings | select name).name + "'" | Out-File $Filename -Append
+                            }
+                        }
+                        #For any entry which is determined to not be a user, it is a SharePoint group
+                        else
+                        {
+                            #Return all users which have been added to the role assignment
+                            $allUsers = $Roleassignment.member.users
+                            
+                            #Perform some action against all members returned.
+                            foreach($User in $AllUsers)
+                            {
+                                #If the User's domain matches the target domain or NT Authority (for authenticatec users), perform some action
+                                if((UserSource($user.LoginName)) -eq $UnwantedDomainPrefix -or $UnwantedDomainPrefix -eq "")
+                                {
+                                    #Write an entry to the log file indicating that the targeted user has been added to the specified SharePoint group.
+                                    "User '" + $User.Name + "'(" + (UserSource($user.LoginName)) + ") has been added to the '" + $RoleAssignment.member.name + "' group" | Out-File $Filename -Append
+                                }
+                            }
+                        }
+                    }
+                }
+				
+				$ListItems = $List.Items
+				
+				Try
+				{
+					foreach ($anItem in $ListItems)
+					{
+						if ($anItem.HasUniqueRoleAssignments)
+						{
+							#Log to the log file thta the specified item is assigned unique permissions
+                    		"`r`nItem '" + $anItem.DisplayName + "' is using unique permissions `r`nURL: " +  $Web.Url + "/" + $anItem.URL | Out-File $Filename -Append
+
+							$RollAssignments = $anItem.RoleAssignments
+						
+							#Perform some action against all role assignments returned
+    	                	foreach($RoleAssignment in $RollAssignments)
+        	            	{	
+            	            	#Determine whether This is a an AD object or a SharePoint group.  Only domain users and groups have a userlogin property
+                	        	if(UserSource($RoleAssignment.Member.LoginName) -ne "")
+                    	    	{
+                        	    	#If the User's domain matches the target domain or NT Authority (for authenticatec users), perform some action
+                            		if((UserSource($RoleAssignment.Member.LoginName)) -eq $UnwantedDomainPrefix -or $UnwantedDomainPrefix -eq "")
+                            		{
+                                		#Write an entry to the log file indicating that the targeted user has been granted a a specific right.
+	                                	"User '" + $RoleAssignment.Member.Name + "'(" + (UserSource($RoleAssignment.Member.LoginName)) + ") has been assigned '" + ($RoleAssignment.RoleDefinitionBindings | select name).name + "'" | Out-File $Filename -Append
+    	                        	}
+        	                	}
+            	            	#For any entry which is determined to not be a user, it is a SharePoint group
+                	        	else
+                    	    	{
+                        	    	#Return all users which have been added to the role assignment
+                            		$allUsers = $Roleassignment.member.users
+                            
+	                            	#Perform some action against all members returned.
+    	                        	foreach($User in $AllUsers)
+        	                    	{
+            	                    	#If the User's domain matches the target domain or NT Authority (for authenticatec users), perform some action
+                	                	if((UserSource($user.LoginName)) -eq $UnwantedDomainPrefix -or $UnwantedDomainPrefix -eq "")
+                    	            	{
+                        	            	#Write an entry to the log file indicating that the targeted user has been added to the specified SharePoint group.
+                            	        	"User '" + $User.Name + "'(" + (UserSource($user.LoginName)) + ") has been added to the '" + $RoleAssignment.member.name + "' group" | Out-File $Filename -Append
+                                		}
+	                            	}
+    	                    	}
+							}
+						}
+					}
+            }
+			Catch [System.Management.Automation.RuntimeException]
+			{
+				Write-Host "Caught Exception on ListItems for List: " $List.Title
+			}
+        }
+    }
+    }
+}
+}}
