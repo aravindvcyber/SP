@@ -1,0 +1,65 @@
+Get all users who are members of the "Owners" groups.
+Get-SPSite -Limit All | 
+  Get-SPWeb -Limit All | 
+  where { $_.HasUniquePerm -and $_.AssociatedOwnerGroup -ne $null } | 
+  foreach { $TTNweburl = $_.Url; $_ } | 
+  Select -ExpandProperty AssociatedOwnerGroup | 
+  Select -ExpandProperty Users | 
+  Select {$TTNweburl}, UserLogin, DisplayName
+ 
+
+Get all users directly given Full Control
+Get-SPSite -Limit All | 
+  Get-SPWeb -Limit All | 
+  Where { $_.HasUniquePerm } | 
+  foreach { $TTNweb = $_; $_ } | 
+  Select -ExpandProperty Users | 
+  Where { $TTNweb.DoesUserHavePermissions($_,[Microsoft.SharePoint.SPBasePermissions]::FullMask) } | 
+  Select {$TTNweb.Url}, UserLogin, DisplayName
+You could also find users with Full Control like roles by testing for "ManageWeb" or "ManagePermissions". For a list of the permission types use:
+
+[System.Enum]::GetNames("Microsoft.SharePoint.SPBasePermissions")
+ 
+
+Get all users who are Site Collection Administrators:
+Get-SPSite -Limit All | 
+  Get-SPWeb -Limit All | 
+  where { $_.HasUniquePerm } | 
+  foreach { $TTNweburl = $_.Url; $_ } | 
+  Select -ExpandProperty Users | 
+  Where { $_.IsSiteAdmin } | 
+  Select {$TTNweburl}, UserLogin, DisplayName
+ 
+
+Who else can see the content, and might have Full Control?
+Some users may have access to site content via Web Application level policies. These are set in Central Administration in the Web Application Management section.
+
+Get-SPWebApplication | 
+  foreach { $TTNwebappUrl = $_.Url; $_ } | 
+  Select -ExpandProperty Policies |  
+  Select {$TTNwebappUrl}, DisplayName, IsSystemUser, PolicyRoleBindings, UserName | FT
+  
+  
+  
+  For both SharePoint 2007 or 2010 in any PowerShell:
+
+[System.Reflection.Assembly]::LoadWithPartialName("Microsoft.SharePoint")
+
+$site = New-Object Microsoft.SharePoint.SPSite("http://yourservername/sites/yoursitecollection ")
+
+$groups = $site.RootWeb.sitegroups
+
+foreach ($grp in $groups) {"Group: " + $grp.name; foreach ($user in $grp.users) {"  User: " + $user.name} }
+
+$site.Dispose()
+ 
+
+or for SharePoint 2010 in the SharePoint 2010 Management Shell:
+
+$site = Get-SPSite http://yourservername/sites/yoursitecollection 
+
+$groups = $site.RootWeb.sitegroups
+
+foreach ($grp in $groups) {"Group: " + $grp.name; foreach ($user in $grp.users) {"  User: " + $user.name} }
+
+$site.Dispose()
